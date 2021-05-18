@@ -533,12 +533,15 @@ class MenuController: NSObject, NSMenuDelegate {
     for (index, plugin) in PlayerCore.active.plugins.enumerated() {
       var counter = 0
       var rootMenu: NSMenu! = pluginMenu
-      if plugin.menuItems.isEmpty { continue }
+      let menuItems = (plugin.plugin.globalInstance?.menuItems ?? []) + plugin.menuItems
+      if menuItems.isEmpty { continue }
+      
       if index != 0 {
         pluginMenu.addItem(.separator())
       }
       pluginMenu.addItem(withTitle: plugin.plugin.name, enabled: false)
-      for item in plugin.menuItems {
+      
+      for item in menuItems {
         if counter == 5 {
           Logger.log("Please avoid adding too much first-level menu items. IINA will only display the first 5 of them.",
                      level: .warning, subsystem: plugin.subsystem)
