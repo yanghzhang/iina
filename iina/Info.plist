@@ -473,7 +473,9 @@
 		</dict>
 	</dict>
 	<key>NSHumanReadableCopyright</key>
-	<string>Released under GPLv3.</string>
+        <string>Copyright © 2017-2022
+Collider LI, et al.
+Released under GPLv3.</string>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
@@ -1151,5 +1153,7 @@
 			</dict>
 		</dict>
 	</array>
+	<key>NSPrefersDisplaySafeAreaCompatibilityMode</key>
+	<false/>
 </dict>
 </plist>

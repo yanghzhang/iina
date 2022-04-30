@@ -9,7 +9,7 @@
 import Cocoa
 
 extension NSSlider {
-  /** Returns the positon of knob center by point */
+  /** Returns the position of knob center by point */
   func knobPointPosition() -> CGFloat {
     let sliderOrigin = frame.origin.x + knobThickness / 2
     let sliderWidth = frame.width - knobThickness
@@ -381,8 +381,13 @@ extension Data {
 }
 
 extension FileHandle {
-  func read<T>(type: T.Type /* To prevent unintended specializations */) -> T {
-    return readData(ofLength: MemoryLayout<T>.size).withUnsafeBytes {
+  func read<T>(type: T.Type /* To prevent unintended specializations */) -> T? {
+    let size = MemoryLayout<T>.size
+    let data = readData(ofLength: size)
+    guard data.count == size else {
+      return nil
+    }
+    return data.withUnsafeBytes {
       $0.bindMemory(to: T.self).first!
     }
   }
@@ -415,10 +420,10 @@ extension String {
     removeLast(Swift.min(num, count))
   }
 
-  func countOccurances(of str: String, in range: Range<Index>?) -> Int {
+  func countOccurrences(of str: String, in range: Range<Index>?) -> Int {
     if let firstRange = self.range(of: str, options: [], range: range, locale: nil) {
       let nextRange = firstRange.upperBound..<self.endIndex
-      return 1 + countOccurances(of: str, in: nextRange)
+      return 1 + countOccurrences(of: str, in: nextRange)
     } else {
       return 0
     }
@@ -592,6 +597,17 @@ extension NSAppearance {
       return name == .darkAqua || name == .vibrantDark || name == .accessibilityHighContrastDarkAqua || name == .accessibilityHighContrastVibrantDark
     } else {
       return name == .vibrantDark
+    }
+  }
+}
+
+extension NSScreen {
+  /// Height of the camera housing on this screen if this screen has an embedded camera.
+  var cameraHousingHeight: CGFloat? {
+    if #available(macOS 12.0, *) {
+      return safeAreaInsets.top == 0.0 ? nil : safeAreaInsets.top
+    } else {
+      return nil
     }
   }
 }

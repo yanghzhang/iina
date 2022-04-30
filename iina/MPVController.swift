@@ -41,6 +41,8 @@ class MPVController: NSObject {
   var mpv: OpaquePointer!
   var mpvRenderContext: OpaquePointer?
 
+  private var openGLContext: CGLContextObj! = nil
+
   var mpvClientName: UnsafePointer<CChar>!
   var mpvVersion: String!
 
@@ -72,6 +74,7 @@ class MPVController: NSObject {
     MPVProperty.chapter: MPV_FORMAT_INT64,
     MPVOption.Video.deinterlace: MPV_FORMAT_FLAG,
     MPVOption.Video.hwdec: MPV_FORMAT_STRING,
+    MPVOption.Video.videoRotate: MPV_FORMAT_INT64,
     MPVOption.Audio.mute: MPV_FORMAT_FLAG,
     MPVOption.Audio.volume: MPV_FORMAT_DOUBLE,
     MPVOption.Audio.audioDelay: MPV_FORMAT_DOUBLE,
@@ -126,7 +129,7 @@ class MPVController: NSObject {
     // - Advanced
 
     // disable internal OSD
-    let useMpvOsd = Preference.bool(for: .useMpvOsd)
+    let useMpvOsd = Preference.bool(for: .enableAdvancedSettings) && Preference.bool(for: .useMpvOsd)
     if !useMpvOsd {
       chkErr(mpv_set_option_string(mpv, MPVOption.OSD.osdLevel, "0"))
     } else {
@@ -283,28 +286,30 @@ class MPVController: NSObject {
             "\(MPVOption.PlaybackControl.abLoopA),\(MPVOption.PlaybackControl.abLoopB)"))
 
     // Set user defined conf dir.
-    if Preference.bool(for: .useUserDefinedConfDir) {
-      if var userConfDir = Preference.string(for: .userDefinedConfDir) {
-        userConfDir = NSString(string: userConfDir).standardizingPath
-        mpv_set_option_string(mpv, "config", "yes")
-        let status = mpv_set_option_string(mpv, MPVOption.ProgramBehavior.configDir, userConfDir)
-        if status < 0 {
-          Utility.showAlert("extra_option.config_folder", arguments: [userConfDir])
-        }
+    if Preference.bool(for: .enableAdvancedSettings),
+       Preference.bool(for: .useUserDefinedConfDir),
+       var userConfDir = Preference.string(for: .userDefinedConfDir) {
+      userConfDir = NSString(string: userConfDir).standardizingPath
+      mpv_set_option_string(mpv, "config", "yes")
+      let status = mpv_set_option_string(mpv, MPVOption.ProgramBehavior.configDir, userConfDir)
+      if status < 0 {
+        Utility.showAlert("extra_option.config_folder", arguments: [userConfDir])
       }
     }
 
     // Set user defined options.
-    if let userOptions = Preference.value(for: .userOptions) as? [[String]] {
-      userOptions.forEach { op in
-        let status = mpv_set_option_string(mpv, op[0], op[1])
-        if status < 0 {
-          Utility.showAlert("extra_option.error", arguments:
-            [op[0], op[1], status])
+    if Preference.bool(for: .enableAdvancedSettings) {
+      if let userOptions = Preference.value(for: .userOptions) as? [[String]] {
+        userOptions.forEach { op in
+          let status = mpv_set_option_string(mpv, op[0], op[1])
+          if status < 0 {
+            Utility.showAlert("extra_option.error", arguments:
+              [op[0], op[1], status])
+          }
         }
+      } else {
+        Utility.showAlert("extra_option.cannot_read")
       }
-    } else {
-      Utility.showAlert("extra_option.cannot_read")
     }
 
     // Load external scripts
@@ -331,12 +336,12 @@ class MPVController: NSObject {
       mpvController.readEvents()
       }, mutableRawPointerOf(obj: self))
 
-    // Observe propoties.
+    // Observe properties.
     observeProperties.forEach { (k, v) in
       mpv_observe_property(mpv, 0, k, v)
     }
 
-    // Initialize an uninitialized mpv instance. If the mpv instance is already running, an error is retuned.
+    // Initialize an uninitialized mpv instance. If the mpv instance is already running, an error is returned.
     chkErr(mpv_initialize(mpv))
 
     // Set options that can be override by user's config. mpv will log user config when initialize,
@@ -366,8 +371,30 @@ class MPVController: NSObject {
         mpv_render_param()
       ]
       mpv_render_context_create(&mpvRenderContext, mpv, &params)
+      openGLContext = CGLGetCurrentContext()
       mpv_render_context_set_update_callback(mpvRenderContext!, mpvUpdateCallback, mutableRawPointerOf(obj: player.mainWindow.videoView.videoLayer))
     }
+  }
+
+  /// Lock the OpenGL context associated with the mpv renderer and set it to be the current context for this thread.
+  ///
+  /// This method is needed to meet this requirement from `mpv/render.h`:
+  ///
+  /// If the OpenGL backend is used, for all functions the OpenGL context must be "current" in the calling thread, and it must be the
+  /// same OpenGL context as the `mpv_render_context` was created with. Otherwise, undefined behavior will occur.
+  ///
+  /// - Reference: [mpv render.h](https://github.com/mpv-player/mpv/blob/master/libmpv/render.h)
+  /// - Reference: [Concurrency and OpenGL](https://developer.apple.com/library/archive/documentation/GraphicsImaging/Conceptual/OpenGL-MacProgGuide/opengl_threading/opengl_threading.html)
+  /// - Reference: [OpenGL Context](https://www.khronos.org/opengl/wiki/OpenGL_Context)
+  /// - Attention: Do not forget to unlock the OpenGL context by calling `unlockOpenGLContext`
+  func lockAndSetOpenGLContext() {
+    CGLLockContext(openGLContext)
+    CGLSetCurrentContext(openGLContext)
+  }
+
+  /// Unlock the OpenGL context associated with the mpv renderer.
+  func unlockOpenGLContext() {
+    CGLUnlockContext(openGLContext)
   }
 
   func mpvUninitRendering() {
@@ -409,7 +436,11 @@ class MPVController: NSObject {
     guard mpv != nil else { return }
     var cargs = makeCArgs(command, args).map { $0.flatMap { UnsafePointer<CChar>(strdup($0)) } }
     defer {
-      for ptr in cargs { free(UnsafeMutablePointer(mutating: ptr)) }
+      for ptr in cargs {
+        if (ptr != nil) {
+          free(UnsafeMutablePointer(mutating: ptr!))
+        }
+      }
     }
     let returnValue = mpv_command(self.mpv, &cargs)
     if checkError {
@@ -427,7 +458,11 @@ class MPVController: NSObject {
     guard mpv != nil else { return }
     var cargs = makeCArgs(command, args).map { $0.flatMap { UnsafePointer<CChar>(strdup($0)) } }
     defer {
-      for ptr in cargs { free(UnsafeMutablePointer(mutating: ptr)) }
+      for ptr in cargs {
+        if (ptr != nil) {
+          free(UnsafeMutablePointer(mutating: ptr!))
+        }
+      }
     }
     let returnValue = mpv_command_async(self.mpv, replyUserdata, &cargs)
     if checkError {
@@ -619,8 +654,8 @@ class MPVController: NSObject {
 
     case MPV_EVENT_START_FILE:
       player.info.isIdle = false
-      guard getString(MPVProperty.path) != nil else { break }
-      player.fileStarted()
+      guard let path = getString(MPVProperty.path) else { break }
+      player.fileStarted(path: path)
       let url = player.info.currentURL
       let message = player.info.isNetworkResource ? url?.absoluteString : url?.lastPathComponent
       player.sendOSD(.fileStart(message ?? "-"))
@@ -692,9 +727,7 @@ class MPVController: NSObject {
     player.info.displayHeight = 0
     player.info.videoDuration = VideoTime(duration)
     if let filename = getString(MPVProperty.path) {
-      player.playlistQueue.async {
-        self.player.info.cachedVideoDurationAndProgress[filename]?.duration = duration
-      }
+      self.player.info.setCachedVideoDuration(filename, duration)
     }
     player.info.videoPosition = VideoTime(pos)
     player.fileLoaded()
@@ -749,6 +782,10 @@ class MPVController: NSObject {
       player.info.vid = Int(getInt(MPVOption.TrackSelection.vid))
       player.postNotification(.iinaVIDChanged)
       player.sendOSD(.track(player.info.currentTrack(.video) ?? .noneVideoTrack))
+
+      if #available(macOS 10.15, *) {
+        player.refreshEdrMode()
+      }
 
     case MPVOption.TrackSelection.aid:
       player.info.aid = Int(getInt(MPVOption.TrackSelection.aid))
@@ -817,6 +854,12 @@ class MPVController: NSObject {
       if player.info.hwdec != data {
         player.info.hwdec = data
         player.sendOSD(.hwdec(player.info.hwdecEnabled))
+      }
+
+    case MPVOption.Video.videoRotate:
+      if let data = UnsafePointer<Int64>(OpaquePointer(property.data))?.pointee {
+      let intData = Int(data)
+        player.info.rotation = intData
       }
 
     case MPVOption.Audio.mute:

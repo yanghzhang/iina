@@ -30,7 +30,7 @@ class PlaylistViewController: NSViewController, NSTableViewDataSource, NSTableVi
 
   weak var player: PlayerCore!
 
-  /** Similiar to the one in `QuickSettingViewController`.
+  /** Similar to the one in `QuickSettingViewController`.
    Since IBOutlet is `nil` when the view is not loaded at first time,
    use this variable to cache which tab it need to switch to when the
    view is ready. The value will be handled after loaded.
@@ -161,13 +161,7 @@ class PlaylistViewController: NSViewController, NSTableViewDataSource, NSTableVi
     totalLengthLabel.isHidden = false
     if playlistTableView.numberOfSelectedRows > 0 {
       let info = player.info
-      var selectedDuration = 0.0
-      player.playlistQueue.sync {
-        selectedDuration = playlistTableView.selectedRowIndexes
-          .compactMap { info.cachedVideoDurationAndProgress[info.playlist[$0].filename]?.duration }
-          .compactMap { $0 > 0 ? $0 : 0 }
-          .reduce(0, +)
-      }
+      let selectedDuration = info.calculateTotalDuration(playlistTableView.selectedRowIndexes)
       totalLengthLabel.stringValue = String(format: NSLocalizedString("playlist.total_length_with_selected", comment: "%@ of %@ selected"),
                                             VideoTime(selectedDuration).stringRepresentation,
                                             VideoTime(playlistTotalLength).stringRepresentation)
@@ -182,15 +176,7 @@ class PlaylistViewController: NSViewController, NSTableViewDataSource, NSTableVi
   }
 
   private func refreshTotalLength() {
-    var totalDuration: Double? = 0
-    for p in player.info.playlist {
-      if let duration = player.info.cachedVideoDurationAndProgress[p.filename]?.duration {
-        totalDuration! += duration > 0 ? duration : 0
-      } else {
-        totalDuration = nil
-        break
-      }
-    }
+    let totalDuration: Double? = player.info.calculateTotalDuration()
     if let duration = totalDuration {
       playlistTotalLengthIsReady = true
       playlistTotalLength = duration
@@ -489,7 +475,7 @@ class PlaylistViewController: NSViewController, NSTableViewDataSource, NSTableVi
           if Preference.bool(for: .playlistShowMetadataInMusicMode) && !player.isInMiniPlayer {
             return nil
           }
-          guard let metadata = info.cachedMetadata[item.filename] else { return nil }
+          guard let metadata = info.getCachedMetadata(item.filename) else { return nil }
           guard let artist = metadata.artist, let title = metadata.title else { return nil }
           return (artist, title)
         }
@@ -514,11 +500,11 @@ class PlaylistViewController: NSViewController, NSTableViewDataSource, NSTableVi
               cellView.setAdditionalInfo(artist)
             }
           }
-          if let cached = self.player.info.cachedVideoDurationAndProgress[item.filename],
+          if let cached = self.player.info.getCachedVideoDurationAndProgress(item.filename),
             let duration = cached.duration {
             // if it's cached
             if duration > 0 {
-              // if FFmpeg got the duration succcessfully
+              // if FFmpeg got the duration successfully
               DispatchQueue.main.async {
                 cellView.durationLabel.stringValue = VideoTime(duration).stringRepresentation
                 if let progress = cached.progress {
@@ -532,9 +518,14 @@ class PlaylistViewController: NSViewController, NSTableViewDataSource, NSTableVi
             // get related data and schedule a reload
             if Preference.bool(for: .prefetchPlaylistVideoDuration) {
               self.player.refreshCachedVideoInfo(forVideoPath: item.filename)
-              self.refreshTotalLength()
-              DispatchQueue.main.async {
-                self.playlistTableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0...1))
+              // Only schedule a reload if data was obtained and cached to avoid looping
+              if let cached = self.player.info.getCachedVideoDurationAndProgress(item.filename),
+                  let duration = cached.duration, duration > 0 {
+                // if FFmpeg got the duration successfully
+                self.refreshTotalLength()
+                DispatchQueue.main.async {
+                  self.playlistTableView.reloadData(forRowIndexes: IndexSet(integer: row), columnIndexes: IndexSet(integersIn: 0...1))
+                }
               }
             }
           }

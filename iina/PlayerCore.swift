@@ -172,7 +172,7 @@ class PlayerCore: NSObject {
    Open a list of urls. If there are more than one urls, add the remaining ones to
    playlist and disable auto loading.
 
-   - Returns: `nil` if no futher action is needed, like opened a BD Folder; otherwise the
+   - Returns: `nil` if no further action is needed, like opened a BD Folder; otherwise the
    count of playable files.
    */
   @discardableResult
@@ -449,6 +449,10 @@ class PlayerCore: NSObject {
   
   func pause() {
     mpv.setFlag(MPVOption.PlaybackControl.pause, true)
+    // Follow energy efficiency best practices and ensure IINA is absolutely idle when the video is
+    // paused to avoid wasting energy with needless processing.
+    invalidateTimer()
+    mainWindow.videoView.stopDisplayLink()
   }
   
   func resume() {
@@ -457,6 +461,8 @@ class PlayerCore: NSObject {
       seek(absoluteSecond: 0)
     }
     mpv.setFlag(MPVOption.PlaybackControl.pause, false)
+    createSyncUITimer()
+    mainWindow.videoView.startDisplayLink()
   }
 
   func stop() {
@@ -650,7 +656,6 @@ class PlayerCore: NSObject {
   func setVideoRotate(_ degree: Int) {
     if AppData.rotations.firstIndex(of: degree)! >= 0 {
       mpv.setInt(MPVOption.Video.videoRotate, degree)
-      info.rotation = degree
     }
   }
 
@@ -1017,11 +1022,9 @@ class PlayerCore: NSObject {
     mpv.command(.writeWatchLaterConfig)
     if let url = info.currentURL {
       Preference.set(url, for: .iinaLastPlayedFilePath)
-      playlistQueue.async {
-        // Write to cache directly (rather than calling `refreshCachedVideoProgress`).
-        // If user only closed the window but didn't quit the app, this can make sure playlist displays the correct progress.
-        self.info.cachedVideoDurationAndProgress[url.path] = (duration: self.info.videoDuration?.second, progress: self.info.videoPosition?.second)
-      }
+      // Write to cache directly (rather than calling `refreshCachedVideoProgress`).
+      // If user only closed the window but didn't quit the app, this can make sure playlist displays the correct progress.
+      info.setCachedVideoDurationAndProgress(url.path, (duration: info.videoDuration?.second, progress: info.videoPosition?.second))
     }
     if let position = info.videoPosition?.second {
       Preference.set(position, for: .iinaLastPlayedFilePosition)
@@ -1036,19 +1039,19 @@ class PlayerCore: NSObject {
 
   // MARK: - Listeners
 
-  func fileStarted() {
+  func fileStarted(path: String) {
     Logger.log("File started", subsystem: subsystem)
     info.justStartedFile = true
     info.disableOSDForFileLoading = true
     currentMediaIsAudio = .unknown
-    guard let path = mpv.getString(MPVProperty.path) else { return }
+
     info.currentURL = path.contains("://") ?
       URL(string: path.addingPercentEncoding(withAllowedCharacters: .urlAllowed) ?? path) :
       URL(fileURLWithPath: path)
     info.isNetworkResource = !info.currentURL!.isFileURL
 
     if #available(OSX 10.13, *), RemoteCommandController.useSystemMediaControl {
-      NowPlayingInfoManager.updateInfo(withTitle: true)
+      NowPlayingInfoManager.updateInfo(state: .playing, withTitle: true)
     }
 
     // Auto load
@@ -1173,6 +1176,14 @@ class PlayerCore: NSObject {
     }
   }
 
+  @available(macOS 10.15, *)
+  func refreshEdrMode() {
+    guard mainWindow.loaded else { return }
+    DispatchQueue.main.async {
+      self.mainWindow.videoView.refreshEdrMode()
+    }
+  }
+
   @objc
   private func reEnableOSDAfterFileLoading() {
     info.disableOSDForFileLoading = false
@@ -1206,7 +1217,7 @@ class PlayerCore: NSObject {
   }
 
   /**
-   Checkes unsynchronized window options, such as those set via mpv before window loaded.
+   Checks unsynchronized window options, such as those set via mpv before window loaded.
 
    These options currently include fullscreen and ontop.
    */
@@ -1425,7 +1436,7 @@ class PlayerCore: NSObject {
         }
       } else {
         Logger.log("Request new thumbnails", subsystem: subsystem)
-        ffmpegController.generateThumbnail(forFile: url.path)
+        ffmpegController.generateThumbnail(forFile: url.path, thumbWidth:Int32(Preference.integer(for: .thumbnailWidth)))
       }
     }
   }
@@ -1636,10 +1647,10 @@ class PlayerCore: NSObject {
   func refreshCachedVideoInfo(forVideoPath path: String) {
     guard let dict = FFmpegController.probeVideoInfo(forFile: path) else { return }
     let progress = Utility.playbackProgressFromWatchLater(path.md5)
-    self.info.cachedVideoDurationAndProgress[path] = (
+    self.info.setCachedVideoDurationAndProgress(path, (
       duration: dict["@iina_duration"] as? Double,
       progress: progress?.second
-    )
+    ))
     var result: (title: String?, album: String?, artist: String?)
     dict.forEach { (k, v) in
       guard let key = k as? String else { return }
@@ -1654,7 +1665,7 @@ class PlayerCore: NSObject {
         break
       }
     }
-    self.info.cachedMetadata[path] = result
+    self.info.setCachedMetadata(path, result)
   }
 
   enum CurrentMediaIsAudioStatus {
@@ -1720,10 +1731,17 @@ extension PlayerCore: FFmpegControllerDelegate {
 
 @available (macOS 10.13, *)
 class NowPlayingInfoManager {
-  static let center = MPNowPlayingInfoCenter.default()
-  static private var info = [String: Any]()
+  static private let lock = NSLock()
 
-  static func updateInfo(withTitle: Bool = false) {
+  static func updateInfo(state: MPNowPlayingPlaybackState? = nil, withTitle: Bool = false) {
+    // This method is called from the main thread and from background threads. Must single thread access.
+    lock.lock()
+    defer {
+      lock.unlock()
+    }
+    let center = MPNowPlayingInfoCenter.default()
+    var info = center.nowPlayingInfo ?? [String: Any]()
+
     let activePlayer = PlayerCore.lastActive
 
     if withTitle {
@@ -1749,10 +1767,9 @@ class NowPlayingInfoManager {
     info[MPNowPlayingInfoPropertyDefaultPlaybackRate] = 1
 
     center.nowPlayingInfo = info
-  }
 
-  static func updateState(_ state: MPNowPlayingPlaybackState) {
-    center.playbackState = state
-    updateInfo()
+    if state != nil {
+      center.playbackState = state!
+    }
   }
 }
